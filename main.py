@@ -1,18 +1,15 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
 import os
 import subprocess
 import xml.etree.ElementTree as ET
-import time
-import schedule
-import threading
+from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
+import glob
 
 # Create necessary directories
 if not os.path.exists("reports"):
@@ -24,7 +21,6 @@ if not os.path.exists("scan_results"):
 def run_nmap_scan(network, output_dir):
     nmap_output = os.path.join(output_dir, f"nmap_output_{network.replace('/', '_').replace('.', '_')}.xml")
     nmap_command = f"nmap -p- -oX \"{nmap_output}\" {network}"
-
     try:
         subprocess.run(nmap_command, shell=True, check=True, capture_output=True, text=True)
         return nmap_output
@@ -36,7 +32,6 @@ def run_nmap_scan(network, output_dir):
 def run_nikto_scan(network, output_dir):
     nikto_output = os.path.join(output_dir, f"nikto_output_{network.replace('/', '_').replace('.', '_')}.xml")
     nikto_command = f"nikto -h {network} -output {nikto_output} -Format xml"
-
     try:
         subprocess.run(nikto_command, shell=True, check=True, capture_output=True, text=True)
         return nikto_output
@@ -158,24 +153,14 @@ def generate_report(output_dir, run_nmap, run_nikto):
     doc.build(content)
     return report_path
 
+# Function to fetch scan files for Dashboard metrics
+def fetch_scan_files():
+    scan_files = glob.glob(os.path.join(os.getcwd(), "scan_results_*_*"))
+    return scan_files
+
 def main():
     st.set_page_config(page_title="Security Assessment Dashboard", layout="wide")
     
-    # Custom CSS
-    st.markdown("""
-        <style>
-        .main {
-            padding-top: 2rem;
-        }
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 2rem;
-        }
-        .stTabs [data-baseweb="tab"] {
-            height: 4rem;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
     st.title("🛡️ Security Assessment Dashboard")
     
     tabs = st.tabs(["📊 Dashboard", "🔍 Scan Control", "📅 Scheduler", "📑 Reports"])
@@ -183,13 +168,16 @@ def main():
     # Dashboard Tab
     with tabs[0]:
         col1, col2, col3 = st.columns(3)
+
+        scan_files = fetch_scan_files()
+        total_files = len(scan_files)
         
         with col1:
             st.metric("Active Scans", "2", "+1")
         with col2:
             st.metric("Total Vulnerabilities", "15", "-3")
         with col3:
-            st.metric("Scan Success Rate", "98%", "+2%")
+            st.metric("Total scan files", total_files, f"+{total_files}")
             
         # Vulnerability Distribution Chart
         st.subheader("Vulnerability Distribution")
@@ -200,15 +188,6 @@ def main():
         fig = px.pie(vuln_data, values='Count', names='Severity', hole=0.3)
         st.plotly_chart(fig, use_container_width=True)
         
-        # Recent Activity
-        st.subheader("Recent Activity")
-        activity_df = pd.DataFrame({
-            'Timestamp': ['2024-01-18 10:00', '2024-01-18 09:45', '2024-01-18 09:30'],
-            'Event': ['Scan Completed', 'Vulnerability Detected', 'Scan Started'],
-            'Details': ['Network: 192.168.1.0/24', 'Critical: SQL Injection', 'Target: 10.0.0.0/24']
-        })
-        st.dataframe(activity_df, use_container_width=True)
-
     # Scan Control Tab
     with tabs[1]:
         st.header("Scan Control")
@@ -288,15 +267,7 @@ def main():
             st.success(f"Scans scheduled to run {schedule_frequency.lower()}")
             
         # Show scheduled scans
-        st.subheader("Scheduled Scans")
-        scheduled_df = pd.DataFrame({
-            'Frequency': ['Daily', 'Weekly'],
-            'Target': ['192.168.1.0/24', '10.0.0.0/24'],
-            'Scan Types': ['Nmap + Nikto', 'Nmap'],
-            'Next Run': ['2024-01-19 00:00', '2024-01-24 00:00']
-        })
-        st.dataframe(scheduled_df, use_container_width=True)
-
+        
     # Reports Tab
     with tabs[3]:
         st.header("Scan Reports")
