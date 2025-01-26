@@ -13,6 +13,12 @@ import concurrent.futures
 import threading
 import argparse
 from lxml import etree
+import json
+import numpy as np
+from math import pi
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 
 
 # Create necessary directories
@@ -20,6 +26,8 @@ if not os.path.exists("reports"):
     os.makedirs("reports")
 if not os.path.exists("scan_results"):
     os.makedirs("scan_results")
+if not os.path.exists("ipaddr"):
+    os.makedirs("ipaddr")
 
 # Shared thread-safe logging
 class ThreadSafeLogger:
@@ -94,7 +102,116 @@ def execute_scans(networks, output_dir, run_nmap, run_nikto):
     
     return scan_results
 
+def save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings):
+    """
+    Save IP details to a JSON file in the ipaddr directory with consistent formatting
+    """
+    # Prepare the data structure with consistent formatting
+    ip_data = {
+        "timestamp": datetime.now().isoformat(),  # Ensure ISO 8601 format
+        "ip_address": str(target_ip),
+        "open_ports": [
+            {"port": str(port), "service": str(service)} 
+            for port, service in open_ports
+        ],
+        "filtered_ports": [
+            {"port": str(port), "service": str(service)} 
+            for port, service in filtered_ports
+        ],
+        "web_vulnerabilities": [
+            str(finding) for finding in nikto_findings[0] if finding
+        ]
+    }
+
+    # Create filename using IP address
+    base_filename = os.path.join("ipaddr", f"{target_ip.replace('.', '_')}_details.json")
     
+    # Write to file with proper indentation
+    try:
+        # Check if file exists and has previous data
+        if os.path.exists(base_filename):
+            with open(base_filename, 'r') as f:
+                try:
+                    existing_data = json.load(f)
+                    # Ensure it's a list, if not convert
+                    if not isinstance(existing_data, list):
+                        existing_data = [existing_data]
+                except json.JSONDecodeError:
+                    existing_data = []
+        else:
+            existing_data = []
+    
+        # Append new scan data
+        existing_data.append(ip_data)
+        
+        # Write back to file with all versions
+        with open(base_filename, 'w') as f:
+            json.dump(existing_data, f, indent=4)
+    
+    except IOError as e:
+        st.error(f"Error saving IP details: {e}")
+
+
+
+
+
+def get_all_ip_scan_details():
+    """
+    Retrieve the most recent scan details for all IP addresses with error handling
+    
+    Returns:
+        list: Most recent scan details for each IP address
+    """
+    ip_details = []
+    
+    # Check if ipaddr directory exists
+    if not os.path.exists("ipaddr"):
+        st.warning("IP address details directory not found.")
+        return ip_details
+
+    # Check if directory is empty
+    ip_files = [f for f in os.listdir("ipaddr") if f.endswith("_details.json")]
+    
+    if not ip_files:
+        st.info("No IP scan details found. Run a scan to generate details.")
+        return ip_details
+
+    # Process each JSON file
+    for filename in ip_files:
+        filepath = os.path.join("ipaddr", filename)
+        try:
+            with open(filepath, 'r') as f:
+                file_content = f.read().strip()
+                
+                # Check if file is empty
+                if not file_content:
+                    st.warning(f"Empty file found: {filename}")
+                    continue
+                
+                # Attempt to parse JSON
+                try:
+                    all_ip_data = json.loads(file_content)
+                    
+                    # Get the most recent scan (last item in the list)
+                    if all_ip_data and isinstance(all_ip_data, list):
+                        latest_ip_data = all_ip_data[-1]
+                        
+                        # Validate the structure of the JSON
+                        required_keys = ['ip_address', 'open_ports', 'filtered_ports', 'web_vulnerabilities']
+                        if all(key in latest_ip_data for key in required_keys):
+                            ip_details.append(latest_ip_data)
+                        else:
+                            st.warning(f"Incomplete data in file: {filename}")
+                
+                except json.JSONDecodeError:
+                    st.error(f"JSON decoding error in file: {filename}")
+        
+        except IOError as e:
+            st.error(f"Error reading file {filename}: {e}")
+    
+    return ip_details
+
+
 def parse_nmap_results(filepath):
     """Parse Nmap scan results."""
     open_ports = []
@@ -267,6 +384,7 @@ def generate_report(output_dir, run_nmap, run_nikto):
     ) =parse_nmap_results(os.path.join(output_dir, "nmap_output.xml"))
 
     nikto_findings = parse_nikto_results(os.path.join(output_dir, "nikto_output.xml"))
+    save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings)
 
     doc = SimpleDocTemplate(report_path, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -604,36 +722,179 @@ def fetch_scan_files():
     scan_files = glob.glob(os.path.join(os.getcwd(), "scan_results_*_*"))
     return scan_files
 
+
+def fetchtoday_scan_files():
+    # Get today's date in the format YYYY-MM-DD
+    today_date = datetime.now().strftime('%Y%m%d')
+    
+    # Use glob to match files with today's date
+    scan_files = glob.glob(os.path.join(os.getcwd(), f"scan_results_{today_date}_*"))
+    
+    return len(scan_files)
+
+def create_trend_graphs(ip_details):
+    """
+    Create trend graphs for a specific IP address
+    """
+    # Ensure we have data
+    if not ip_details:
+        return [None, None, None]
+
+    # Parse timestamps safely
+    timestamps = []
+    for entry in ip_details:
+        try:
+            timestamp = datetime.fromisoformat(entry['timestamp'])
+            timestamps.append(timestamp)
+        except Exception:
+            continue
+
+    # Ensure we have timestamps
+    if not timestamps:
+        return [None, None, None]
+
+    # Count metrics for each scan
+    open_ports_count = [len(entry.get('open_ports', [])) for entry in ip_details]
+    filtered_ports_count = [len(entry.get('filtered_ports', [])) for entry in ip_details]
+    vulnerabilities_count = [len(entry.get('web_vulnerabilities', [])) for entry in ip_details]
+    
+    # Create DataFrame for easier plotting
+    df = pd.DataFrame({
+        'Timestamp': timestamps,
+        'Open Ports': open_ports_count,
+        'Filtered Ports': filtered_ports_count,
+        'Vulnerabilities': vulnerabilities_count
+    })
+
+    # Create line charts using Plotly Express
+    open_ports_fig = px.line(
+        df, x='Timestamp', y='Open Ports', 
+        title=f"Open Ports Trend for {ip_details[0]['ip_address']}",
+        color_discrete_sequence=['yellow']
+
+    )
+    
+    filtered_ports_fig = px.line(
+        df, x='Timestamp', y='Filtered Ports', 
+        title=f"Filtered Ports Trend for {ip_details[0]['ip_address']}"
+    )
+    
+    vulnerabilities_fig = px.line(
+        df, x='Timestamp', y='Vulnerabilities', 
+        title=f"Web Vulnerabilities Trend for {ip_details[0]['ip_address']}"
+    )
+    
+    return [open_ports_fig, filtered_ports_fig, vulnerabilities_fig]
+
 # Main application
 def main():
     st.title("🛡️ Security Assessment Dashboard")
 
-
-
-    tabs = st.tabs(["📊 Dashboard", "🔍 Scan Control", "📅 Scheduler", "📑 Reports"])
+    tabs = st.tabs(["📊 Dashboard", "🔍 Scan Control", "📅 Scheduler", "📑 Reports","🌐 IP Details"])
 
     # Dashboard Tab
     with tabs[0]:
-        col1, col2, col3 = st.columns(3)
-
         scan_files = fetch_scan_files()
         total_files = len(scan_files)
+        today_files = fetchtoday_scan_files()
 
-        with col1:
-            st.metric("Active Scans", "2", "+1")
-        with col2:
-            st.metric("Total Vulnerabilities", "15", "-3")
-        with col3:
-            st.metric("Total scan files", total_files, f"+{total_files}")
+        # Load IP details
+        ip_details_raw = get_all_ip_scan_details()
 
-        # Vulnerability Distribution Chart
-        st.subheader("Vulnerability Distribution")
-        vuln_data = {
-            'Severity': ['Critical', 'High', 'Medium', 'Low'],
-            'Count': [3, 5, 8, 12]
-        }
-        fig = px.pie(vuln_data, values='Count', names='Severity', hole=0.3)
-        st.plotly_chart(fig, use_container_width=True)
+        st.metric("Total Scans", total_files, f"+{today_files}")
+
+        if ip_details_raw:
+            # Group scan details by IP address
+            ip_details_grouped = {}
+            for detail in ip_details_raw:
+                ip = detail['ip_address']
+                if ip not in ip_details_grouped:
+                    ip_details_grouped[ip] = []
+                ip_details_grouped[ip].append(detail)
+
+            # Create overall summary chart
+            data = []
+            for ip, details in ip_details_grouped.items():
+                latest_detail = details[-1]  # Most recent scan
+                data.append({
+                    'IP Address': ip,
+                    'Open Ports': len(latest_detail['open_ports']),
+                    'Filtered Ports': len(latest_detail['filtered_ports'])
+                })
+
+            # Create a DataFrame
+            df = pd.DataFrame(data)
+
+            # Create a Plotly Express stacked bar chart
+            fig = px.bar(df, 
+                x='IP Address', 
+                y=['Open Ports', 'Filtered Ports'], 
+                title="Stacked Bar Chart of Ports (Open & Filtered)", 
+                labels={"IP Address": "IP Address", "value": "Number of Ports"},
+                barmode='stack')
+
+            # Adjust layout for better readability
+            fig.update_layout(
+                height=400,
+                width=800,
+                xaxis_title="IP Addresses",
+                yaxis_title="Number of Ports"
+            )
+            fig.update_xaxes(tickangle=45)
+
+            # Show the overall summary chart
+            st.plotly_chart(fig, use_container_width=True)
+
+        #     # Create tabs for individual IP address analysis
+        #     ip_tabs = st.tabs(list(ip_details_grouped.keys()))
+
+        #     # Populate each IP tab with trend graphs
+        #     for i, (ip, details) in enumerate(ip_details_grouped.items()):
+        #         with ip_tabs[i]:
+        #     # Create trend graphs
+        #             trend_graphs = create_trend_graphs(details)
+                    
+        #             # Modified display logic to handle potential None graphs
+        #             cols = st.columns(3)
+        #             graph_titles = [
+        #                 "Open Ports Trend", 
+        #                 "Filtered Ports Trend", 
+        #                 "Web Vulnerabilities Trend"
+        #             ]
+            
+        #             for col, graph, title in zip(cols, trend_graphs, graph_titles):
+        #                 with col:
+        #                     if graph is not None:
+        #                         st.plotly_chart(graph, use_container_width=True)
+        #                     else:
+        #                         st.warning(f"No data available for {title}")
+        #             # Additional details section
+        #             latest_detail = details[-1]
+        #             st.subheader("Latest Scan Details")
+                    
+        #             # Open Ports Table
+        #             if latest_detail['open_ports']:
+        #                 st.write("Open Ports:")
+        #                 open_ports_df = pd.DataFrame(latest_detail['open_ports'])
+        #                 st.dataframe(open_ports_df, hide_index=True)
+                    
+        #             # Filtered Ports Table
+        #             if latest_detail['filtered_ports']:
+        #                 st.write("Filtered Ports:")
+        #                 filtered_ports_df = pd.DataFrame(latest_detail['filtered_ports'])
+        #                 st.dataframe(filtered_ports_df, hide_index=True)
+                    
+        #             # Web Vulnerabilities
+        #             if latest_detail['web_vulnerabilities']:
+        #                 st.write("Web Vulnerabilities:")
+        #                 vulnerabilities_df = pd.DataFrame({
+        #                     'Vulnerability': latest_detail['web_vulnerabilities']
+        #                 })
+        #                 st.dataframe(vulnerabilities_df, hide_index=True)
+
+        # else:
+        #     st.info("No IP scan details available. Run a scan to generate data.")
+
 
     # Scan Control Tab
     with tabs[1]:
@@ -758,6 +1019,60 @@ def main():
                     st.info("No reports found. Run some scans to generate reports.")
             else:
                 st.warning("Reports directory not found.")
+    with tabs[4]:
+        st.header("IP Address Scan Details")
+        
+        # Retrieve and display IP scan details
+        ip_details = get_all_ip_scan_details()
+        
+        if ip_details:
+            # Create tabs for each IP address
+            ip_tabs = st.tabs([detail['ip_address'] for detail in ip_details])
+            
+            for i, detail in enumerate(ip_details):
+                with ip_tabs[i]:
+                    # Open Ports Section
+                    st.subheader("Open Ports")
+                    if detail['open_ports']:
+                        open_ports_df = pd.DataFrame(detail['open_ports'])
+                        st.dataframe(open_ports_df, use_container_width=True,hide_index=True)
+                    else:
+                        st.info("No open ports found")
+                    
+                    # Filtered Ports Section
+                    st.subheader("Filtered Ports")
+                    if detail['filtered_ports']:
+                        filtered_ports_df = pd.DataFrame(detail['filtered_ports'])
+                        st.dataframe(filtered_ports_df, use_container_width=True,hide_index=True)
+                    else:
+                        st.info("No filtered ports found")
+                    
+                    # Web Vulnerabilities Section
+                    st.subheader("Web Vulnerabilities")
+                    
+                    # Extract only web vulnerabilities
+                    web_vulns = []
+                    if detail['web_vulnerabilities']:
+                        # Check if web_vulnerabilities is a list of lists or contains nested lists
+                        if isinstance(detail['web_vulnerabilities'], list):
+                            for item in detail['web_vulnerabilities']:
+                                if isinstance(item, list):
+                                    # If item is a list, extend web_vulns with its string elements
+                                    web_vulns.extend([str(v) for v in item if isinstance(v, str)])
+                                elif isinstance(item, str):
+                                    # If item is a string and looks like a vulnerability
+                                    web_vulns.append(item)
+                    
+                    # Create DataFrame if web vulnerabilities exist
+                    if web_vulns:
+                        vulnerabilities_df = pd.DataFrame({
+                            'Vulnerability': web_vulns
+                        })
+                        st.dataframe(vulnerabilities_df, use_container_width=True,hide_index=True)
+                    else:
+                        st.info("No web vulnerabilities detected")
+
+
 
 
 # Main execution
